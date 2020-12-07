@@ -19,72 +19,127 @@ namespace ITAintBoring.VirtualEntities.Plugins
 
 
 
-        public SqlConnection getConnection()
+        public SqlConnection getConnection(IPluginExecutionContext context)
         {
-            SqlConnection result = new SqlConnection(connectionString);
-            
-            return result;
+            SqlConnection result = null;
+            if (context.SharedVariables.Contains("connectionstring"))
+            {
+                result = new SqlConnection((string)context.SharedVariables["connectionstring"]);
+                try
+                {
+                    result.Open();
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidPluginExecutionException("Cannot open SQL concection");
+                }
+                return result;
+            }
+            else throw new InvalidPluginExecutionException("Connection string is not defined");
         }
-        
+
+        public TestEntityPlugin(string unsecureString, string secureString)
+        {
+
+            connectionString = secureString;
+        }
+
+
+        public void ParseConditionCollection(DataCollection<ConditionExpression> conditions, ref string keyword, ref Guid recordId)
+        {
+            foreach (ConditionExpression condition in conditions)
+            {
+                if (condition.Operator == ConditionOperator.Like && condition.Values.Count > 0)
+                {
+                    //This is how "search" works
+                    keyword = (string)condition.Values[0];
+                    break;
+                }
+                else if (condition.Operator == ConditionOperator.Equal)
+                {
+                    //throw new InvalidPluginExecutionException(condition.Values[0].ToString());
+                    //This is to support $filter=<id_field> eq <value> sytax
+                    //When this is called from the embedded canvas app
+                    recordId = (Guid)condition.Values[0];
+                    break;
+                }
+            }
+        }
+
         public void Execute(IServiceProvider serviceProvider)
         {
+            
             var context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
+
+            if (context.Stage == 20)
+            {
+                context.SharedVariables["connectionstring"] = connectionString;
+                return;
+            }
+
             if (context.MessageName == "RetrieveMultiple")
             {
                 
                 if (context.Stage == 30)
                 {
-                    string keyword = "%";
+                    string keyword = null;
+                    Guid recordId = Guid.Empty;
                     var qe = (QueryExpression)context.InputParameters["Query"];
-                    var filters = qe.Criteria.Filters;
-                    if (filters.Count > 0)
+                     if(qe.Criteria.Conditions.Count > 0)
                     {
-                        foreach (FilterExpression filter in filters)
-                        {
-                            foreach(ConditionExpression condition in filter.Conditions)
-                                if (condition.Operator == ConditionOperator.Like && condition.Values.Count > 0)
-                                {
-                                    keyword = (string)condition.Values[0];
-                                    break;
-                                }
-                            break;
-                        }
+                        //This is to support 
+                        //ita_testvirtualentities?$filter=ita_testvirtualentityid+eq+...
+                        ParseConditionCollection(qe.Criteria.Conditions, ref keyword, ref recordId);
                     }
-                    if (keyword.StartsWith("[%]")) keyword = "%" + (keyword.Length > 2 ? keyword.Substring(3) : "");
-                    loadEntities(keyword, Guid.Empty);
+                    else if(qe.Criteria.Filters.Count > 0)
+                    {
+                        //This is for the "search"
+                        ParseConditionCollection(qe.Criteria.Filters[0].Conditions, ref keyword, ref recordId);
+                    }
+                    
+                    if (keyword != null && keyword.StartsWith("[%]")) keyword = "%" + (keyword.Length > 2 ? keyword.Substring(3) : "");
+                    loadEntities(context, keyword, recordId);
                     context.OutputParameters["BusinessEntityCollection"] = ec;
                 }
             }
             else if(context.MessageName == "Retrieve")
             {
-                loadEntities("%", Guid.Empty);
+                loadEntities(context, null, context.PrimaryEntityId);
                 context.OutputParameters["BusinessEntity"] = ec.Entities.ToList().Find(e => e.Id == context.PrimaryEntityId);
             }
         }
 
 
-        public void loadEntities(string keyword, Guid id)
+        public void loadEntities(IPluginExecutionContext context, string keyword, Guid id)
         {
-            using (var con = getConnection())
+            
+
+            using (var con = getConnection(context))
             {
 
                 System.Data.SqlClient.SqlCommand command = new System.Data.SqlClient.SqlCommand();
-
-                con.Open();
+                
                 command.Connection = con;
-                if (id == Guid.Empty)
+                if (id != Guid.Empty)
+                {
+                    command.CommandText = "SELECT Id, FirstName, LastName, Email FROM ITAExternalContact " +
+                       "WHERE Id = @Id";
+                    command.Parameters.Add("@Id", SqlDbType.UniqueIdentifier).Value = id;
+                    
+                }
+                else  if(keyword != null)
                 {
                     command.CommandText = "SELECT TOP 3 Id, FirstName, LastName, Email FROM ITAExternalContact " +
-                        "WHERE FirstName like @Keyword OR LastName like @Keyword OR Email like @Keyword";
+                         "WHERE FirstName like @Keyword OR LastName like @Keyword OR Email like @Keyword";
                     command.Parameters.Add("@Keyword", SqlDbType.NVarChar).Value = keyword;
                 }
                 else
                 {
-                    command.CommandText = "SELECT Id, FirstName, LastName, Email FROM ITAExternalContact " +
-                        "WHERE Id = @Id";
-                    command.Parameters.Add("@Id", SqlDbType.UniqueIdentifier).Value = id;
+                    //When there are no search parameters
+                    command.CommandText = "SELECT TOP 3 Id, FirstName, LastName, Email FROM ITAExternalContact ";
                 }
-                
+               
+
 
                 SqlDataReader reader = command.ExecuteReader();
                 if (reader.HasRows)
